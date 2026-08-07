@@ -1,0 +1,69 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ===== 大型数据文件（生成产物，不纳入版本控制）=====
+# HDF5 嵌入文件（几十 GB）
+*.h5
+*.hdf5
+
+# 模型权重 / checkpoint
+*.sav
+*.pth
+*.pt
+
+# 特征 pickle（几十 MB ~ 几 GB）
+*.pickle
+*.pkl
+
+# PDB 结构文件（4742 个）
+dataProcess/custom/pdb/
+
+# 原始 zip
+*.zip
+
+# ===== 输出目录（训练日志 / 指标 / 归档）=====
+output/
+save_model/
+
+# ===== 实验结果 CSV =====
+*.csv
+
+# 生成的分割文件
+dataProcess/public/fold*_train.tsv
+dataProcess/public/fold*_test.tsv
+dataProcess/custom/custom_fold*_train.tsv
+dataProcess/custom/custom_fold*_val.tsv
+dataProcess/custom/custom_train.tsv
+dataProcess/custom/custom_test.tsv
+dataProcess/custom/custom_all_proteins.fasta
+dataProcess/custom/custom_antibodies.fasta
+
+# 自定义数据原始文件（如不需要版本控制）
+# dataProcess/custom/fasta_label4.5.tsv
+# dataProcess/custom/epitope_ratio_train_pdb_ids4645.txt
+# dataProcess/custom/epitope_ratio_test_pdb_ids4645.txt
+
+# ===== 文档（保留，但不排除）=====
+# 论文 PDF
+"*EpiScan*2024*.pdf"
+
+# ===== 工具/IDE =====
+.vscode/
+.idea/
+*.log
+nohup.out
+
+# ===== 环境 =====
+.env
+venv/
+.venv/
+
+# ===== Claude 配置（本项目的记忆文件保留）=====
+.claude/settings.json
+.claude/settings.local.json

@@ -70,12 +70,24 @@ class FullyConnected(nn.Module):
             z1H = z1[:,:,:catsite]  
             z1L = z1[:,:,catsite:]
                  
-        cdrHind = [i for i in cdrindex if i <= len(z1H[0,0,:])]
-        cdrLind = [i-len(z1H[0,0,:]) for i in cdrindex if i > len(z1H[0,0,:])]
-        indAll = [i for i in range(len(z1[0,0,:])-1)]
+        cdrHind = [i for i in cdrindex if i < max(len(z1H[0,0,:]), 1)]
+        cdrLind = [i - max(len(z1H[0,0,:]), 1) for i in cdrindex if i >= max(len(z1H[0,0,:]), 1)]
+        indAll = [i for i in range(max(len(z1[0,0,:]) - 1, 0))]
         indnotcdr = [i for i in indAll if i not in cdrindex]
-        notcdrHind = [i for i in indnotcdr if i < len(z1H[0,0,:])]
-        notcdrLind = [i-len(z1H[0,0,:]) for i in indnotcdr if i >= len(z1H[0,0,:])]
+        notcdrHind = [i for i in indnotcdr if i < max(len(z1H[0,0,:]), 1)]
+        notcdrLind = [i - max(len(z1H[0,0,:]), 1) for i in indnotcdr if i >= max(len(z1H[0,0,:]), 1)]
+
+        # Guard against empty index lists: empty gather produces 0-dim tensors,
+        # which make the mean() collapse to NaN downstream. Use index 0 as a
+        # placeholder so shapes stay non-degenerate.
+        if len(cdrHind) == 0:
+            cdrHind = [0]
+        if len(cdrLind) == 0:
+            cdrLind = [0]
+        if len(notcdrHind) == 0:
+            notcdrHind = [0]
+        if len(notcdrLind) == 0:
+            notcdrLind = [0]
 
 
 
@@ -87,10 +99,15 @@ class FullyConnected(nn.Module):
     
         if 1+1 == 2:
             ##------------------ CDR cat----------------------------------##
-            cdrHind = torch.tensor([[cdrHind]]).cuda().repeat(1,46,1)
-            cdrLind = torch.tensor([[cdrLind]]).cuda().repeat(1,46,1)
-            notcdrHind = torch.tensor([[notcdrHind]]).cuda().repeat(1,46,1)
-            notcdrLind = torch.tensor([[notcdrLind]]).cuda().repeat(1,46,1)
+            cdrHind = torch.tensor([[cdrHind]], device=z1H.device).repeat(1,46,1)
+            cdrLind = torch.tensor([[cdrLind]], device=z1L.device).repeat(1,46,1)
+            notcdrHind = torch.tensor([[notcdrHind]], device=z1H.device).repeat(1,46,1)
+            notcdrLind = torch.tensor([[notcdrLind]], device=z1L.device).repeat(1,46,1)
+            # Clamp to valid range to prevent index out of bounds
+            cdrHind = cdrHind.clamp(0, max(z1H.size(2) - 1, 0))
+            notcdrHind = notcdrHind.clamp(0, max(z1H.size(2) - 1, 0))
+            cdrLind = cdrLind.clamp(0, max(z1L.size(2) - 1, 0))
+            notcdrLind = notcdrLind.clamp(0, max(z1L.size(2) - 1, 0))
             Z1Hcdr = torch.gather(z1H, 2, cdrHind)
             Z1Hnotcdr = torch.gather(z1H, 2, notcdrHind)
             Z1Lcdr = torch.gather(z1L, 2, cdrLind)

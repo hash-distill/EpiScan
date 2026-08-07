@@ -24,6 +24,17 @@ from EpiScan.models.interaction_sep import ModelInteraction
 
 
 def main(args):
+    # Date-stamped output archiving (same as train_sep-auc.py)
+    from datetime import datetime
+    run_date = datetime.now().strftime('%Y%m%d')
+
+    if args.outfile is not None:
+        base, name = os.path.dirname(args.outfile), os.path.basename(args.outfile)
+        base = base if base else 'output'
+        out_dir = os.path.join(base, run_date)
+        os.makedirs(out_dir, exist_ok=True)
+        args.outfile = os.path.join(out_dir, name)
+
     output = args.outfile
     if output is None:
         output = sys.stdout
@@ -67,6 +78,21 @@ def add_args(parser):
         default=-1,
         help="GPU device ID (default: -1, use CPU)"
     )
+    data_grp.add_argument(
+        "--pdb-dict",
+        default="../dataProcess/publicPairs/con_pdb_dict_AgAb.pickle",
+        help="Path to antigen feature pickle file"
+    )
+    data_grp.add_argument(
+        "--cdr-dict",
+        default="../dataProcess/publicPairs/con_cdr_dict.pickle",
+        help="Path to CDR annotation pickle file"
+    )
+    data_grp.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Path to model checkpoint"
+    )
     return parser
 
 
@@ -104,8 +130,16 @@ def train_model(args, output):
     )
 
 
-    modelCon_path = '../trained_model/Seq_final.pth'
-    modelCon.load_state_dict(torch.load(modelCon_path))
+    modelCon_path = args.checkpoint or '../trained_model/Seq_final.pth'
+
+    # Try loading as whole model first, fall back to state_dict
+    loaded = torch.load(modelCon_path, map_location='cpu')
+    if isinstance(loaded, dict):
+        modelCon.load_state_dict(loaded)
+        log(f"Loaded state_dict from {modelCon_path}", file=output)
+    else:
+        modelCon = loaded
+        log(f"Loaded full model from {modelCon_path}", file=output)
     if use_cuda:
         modelCon.cuda()
 
@@ -114,13 +148,13 @@ def train_model(args, output):
 
 
     #####loading Agfeatures data
-    path = "../dataProcess/publicPairs/con_pdb_dict_AgAb.pickle"  
+    path = args.pdb_dict
     with open(path , "rb") as fh:
         encoding_dict = pickle.load(fh)
 
 
-    #####loading cdr data 
-    pathh = "../dataProcess/publicPairs/con_cdr_dict.pickle" 
+    #####loading cdr data
+    pathh = args.cdr_dict
     with open(pathh , "rb") as fhh:
         con_cdr_dict = pickle.load(fhh)
 

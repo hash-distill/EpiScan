@@ -19,6 +19,8 @@ import gzip as gz
 from sklearn.metrics import roc_auc_score
 
 import sys,os
+import math
+from datetime import datetime
 sys.path.append(os.getcwd())
 
 from EpiScan.__init__ import __version__
@@ -34,8 +36,6 @@ from EpiScan.models.interaction_sep import ModelInteraction
 
 from EpiScan.selfLoss.BdiceLoss import BinaryDiceLoss,dice_coeff
 from EpiScan.selfLoss.Bfocalloss import BinaryFocalLoss
-from libauc.losses import CompositionalAUCLoss,AUCMLoss
-from libauc.optimizers import PDSCA
 from EpiScan.models.deep_ppi import DeepPPI
 from typing import Callable, NamedTuple, Optional
 
@@ -214,6 +214,21 @@ def add_args(parser):
     misc_grp.add_argument(
         "--checkpoint"
     )
+    misc_grp.add_argument(
+        "--pdb-dict",
+        default="./dataProcess/publicPairs/con_pdb_dict_AgAb.pickle",
+        help="Path to antigen feature pickle file"
+    )
+    misc_grp.add_argument(
+        "--cdr-dict",
+        default="./dataProcess/publicPairs/con_cdr_dict.pickle",
+        help="Path to CDR annotation pickle file"
+    )
+    misc_grp.add_argument(
+        "--out-metrics",
+        default=None,
+        help="Path to save final metrics summary CSV"
+    )
 
     return parser
 
@@ -229,16 +244,28 @@ def predict_cmap_interaction(model,modelSeq, n0, n1, tensors, encoding_dict,con_
         z_a = tensors[n0[i]]
         z_b = tensors[n1[i]]
 
+        # Clamp CDR indices to the actual antibody embedding length
+        # (PDB-derived CDR dict may be shorter/longer than the TSV-based embedding)
+        ab_len = z_b.shape[1]
         index_cdrlist = [a for a, b in enumerate(con_cdr_dict[n1[i]]) if b == 1]
+        index_cdrlist = [a for a in index_cdrlist if a < ab_len]
+
         meta_a = torch.tensor(encoding_dict[n0[i]]).unsqueeze(0)
         meta_a = meta_a.to(torch.float)
-        z_a = torch.cat([z_a[:,:,:], meta_a], 2)  
+        # Align antigen meta-feature length to embedding length
+        # (PDB chain may miss 1-3 residues vs the TSV sequence)
+        if meta_a.shape[1] < z_a.shape[1]:
+            pad = torch.zeros((1, z_a.shape[1] - meta_a.shape[1], meta_a.shape[2]))
+            meta_a = torch.cat([meta_a, pad], 1)
+        elif meta_a.shape[1] > z_a.shape[1]:
+            meta_a = meta_a[:, :z_a.shape[1], :]
+        z_a = torch.cat([z_a[:,:,:], meta_a], 2)
 
 
         if use_cuda:
             z_a = z_a.cuda()
             z_b = z_b.cuda()
-        cm, ph = model.map_predict(z_a, z_b, catsite[i],index_cdrlist)   
+        cm, ph = model.map_predict(z_a, z_b, catsite[i],index_cdrlist)
         p_hat.append(ph)
         c_map_mag.append(torch.mean(cm))
         prob_tmp = torch.mean(cm[:,:,:,:],3).squeeze()
@@ -292,38 +319,30 @@ def interaction_grad(
 
     diceloss = BinaryDiceLoss()
     focalloss = BinaryFocalLoss()
-    aucloss = CompositionalAUCLoss()
     klLoss =  nn.KLDivLoss()
-    # aucloss = AUCMLoss()
 
     bce_loss_list = []
     dice_loss_list = []
     focal_loss_list = []
-    auc_loss_list = []
     for ii in range(len(y)):
 
-        bce_loss_temp = F.binary_cross_entropy(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
+        ph = torch.clamp(p_hat[ii].float(), 1e-7, 1 - 1e-7)
+
+        bce_loss_temp = F.binary_cross_entropy(ph, y[ii][:len(ph)].float())
         bce_loss_list.append(bce_loss_temp)
         bce_tensor=torch.stack(bce_loss_list,0)
 
-        dice_loss_temp = diceloss(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
+        dice_loss_temp = diceloss(ph, y[ii][:len(ph)].float())
         dice_loss_list.append(dice_loss_temp)
         dice_tensor=torch.stack(dice_loss_list,0)
 
-        focal_loss_temp = focalloss(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
-        # print(focal_loss_temp)
+        focal_loss_temp = focalloss(ph, y[ii][:len(ph)].float())
         focal_loss_list.append(focal_loss_temp)
         focal_tensor=torch.stack(focal_loss_list,0)
-
-        auc_loss_temp = aucloss(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
-        # print(focal_loss_temp)
-        auc_loss_list.append(auc_loss_temp.flatten())
-        auc_tensor=torch.stack(auc_loss_list,0)
 
     # bce_loss = bce_tensor.mean()
     dice_loss = dice_tensor.mean()
     focal_loss = focal_tensor.mean()
-    auc_loss = auc_tensor.mean()
     bce_loss = bce_tensor.mean()
 
 
@@ -377,7 +396,7 @@ def interaction_grad(
         aucc = np.mean(auc_list)
 
     del b_ii_list,correct_list,mse_list
-    del auc_loss_list,auc_tensor,auc_loss_temp,dice_loss_list,dice_tensor,dice_loss_temp,b_ii,p_hat,y,focal_loss_list,focal_tensor,focal_loss_temp  #,bce_loss_list,bce_tensor,bce_loss_temp
+    del dice_loss_list,dice_tensor,dice_loss_temp,b_ii,p_hat,y,focal_loss_list,focal_tensor,focal_loss_temp  #,bce_loss_list,bce_tensor,bce_loss_temp
     torch.cuda.empty_cache()
 
     return loss, correct, mse, b, bacc, aucc
@@ -392,48 +411,42 @@ def interaction_eval(model,modelSeq, test_iterator, tensors, encoding_dict,con_c
         p_hat.append(predict_interaction(model,modelSeq, n0, n1, tensors, encoding_dict,con_cdr_dict, catsite, use_cuda))
 
         true_y.append(y)
-    y = torch.stack(true_y)
-    y = y.squeeze()
+    # Concatenate labels across batches. Batches may differ in size when
+    # dataset_size is not a multiple of batch_size, so torch.cat is required
+    # (torch.stack would fail on unequal shapes).
+    y = torch.cat(true_y, dim=0)  # [num_samples, 2000]
+    p_hat = sum(p_hat, [])
 
 
     if use_cuda:
-        y = [x.cuda() for x in y]
-        y = torch.stack(y)
-        y.cuda()
-        y = torch.reshape(y,(-1,y.shape[2]))
-        p_hat = sum(p_hat, [])
+        y = y.cuda()
 
 
     diceloss = BinaryDiceLoss()
     focalloss = BinaryFocalLoss()
     klloss = nn.KLDivLoss(reduction="batchmean")
-    aucloss = CompositionalAUCLoss()
 
     bce_loss_list = []
     dice_loss_list = []
     klloss_loss_list = []
-    auc_loss_list = []
     for ii in range(len(y)):
 
-        bce_loss_temp = F.binary_cross_entropy(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
+        ph = torch.clamp(p_hat[ii].float(), 1e-7, 1 - 1e-7)
+
+        bce_loss_temp = F.binary_cross_entropy(ph, y[ii][:len(ph)].float())
         bce_loss_list.append(bce_loss_temp)
         bce_tensor=torch.stack(bce_loss_list,0)
 
-        dice_loss_temp = diceloss(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
+        dice_loss_temp = diceloss(ph, y[ii][:len(ph)].float())
         dice_loss_list.append(dice_loss_temp)
         dice_tensor=torch.stack(dice_loss_list,0)
 
-        klloss_loss_temp = klloss(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
+        klloss_loss_temp = klloss(ph, y[ii][:len(ph)].float())
         klloss_loss_list.append(klloss_loss_temp)
         klloss_tensor=torch.stack(klloss_loss_list,0)
 
-        auc_loss_temp = aucloss(p_hat[ii].float(), y[ii][:len(p_hat[ii])].float()) 
-        auc_loss_list.append(auc_loss_temp.flatten())
-        auc_tensor=torch.stack(auc_loss_list,0)
-
     dice_loss = dice_tensor.mean()
     klloss_loss = klloss_tensor.mean()
-    auc_loss = auc_tensor.mean()
     bce_loss = bce_tensor.mean()
 
     loss = (0.9 * dice_loss) + (
@@ -453,8 +466,9 @@ def interaction_eval(model,modelSeq, test_iterator, tensors, encoding_dict,con_c
         pr_list = []
         re_list = []
         f1_list = []
+        mcc_list = []
         dice_list = []
-        guess_cutoff = 0.5    
+        guess_cutoff = 0.5
         for ii in range(len(p_hat)):
             b_ii = len(p_hat[ii])
             p_hat[ii] = p_hat[ii].float()
@@ -466,13 +480,21 @@ def interaction_eval(model,modelSeq, test_iterator, tensors, encoding_dict,con_c
             mse_list.append(mse_temp)
 
             tp_temp = torch.sum(y[ii][:b_ii] * p_guess).item()   #p_hat[ii]
+            tn_temp = torch.sum((1 - y[ii][:b_ii]) * (1 - p_guess)).item()
+            fp_temp = torch.sum((1 - y[ii][:b_ii]) * p_guess).item()
+            fn_temp = torch.sum(y[ii][:b_ii] * (1 - p_guess)).item()
             pr_temp = tp_temp / (torch.sum(p_guess).item() + esp)     #p_hat[ii]
             re_temp = tp_temp / (torch.sum(y[ii][:b_ii]).item() + esp)
             f1_temp = 2 * pr_temp * re_temp / (pr_temp + re_temp + esp)
+            # MCC = (TP*TN - FP*FN) / sqrt((TP+FP)(TP+FN)(TN+FP)(TN+FN))
+            mcc_denom = math.sqrt((tp_temp + fp_temp) * (tp_temp + fn_temp) *
+                                  (tn_temp + fp_temp) * (tn_temp + fn_temp)) + esp
+            mcc_temp = (tp_temp * tn_temp - fp_temp * fn_temp) / mcc_denom
             dice_temp = dice_coeff(p_guess.data.cpu(),y[ii][:b_ii].data.cpu())
             pr_list.append(pr_temp)
             re_list.append(re_temp)
             f1_list.append(f1_temp)
+            mcc_list.append(mcc_temp)
             dice_list.append(dice_temp)
 
         correct = np.mean(correct_list)
@@ -480,6 +502,7 @@ def interaction_eval(model,modelSeq, test_iterator, tensors, encoding_dict,con_c
         pr = np.mean(pr_list)
         re = np.mean(re_list)
         f1 = np.mean(f1_list)
+        mcc = np.mean(mcc_list)
         dice_score = np.mean(dice_list)
 
 
@@ -506,7 +529,7 @@ def interaction_eval(model,modelSeq, test_iterator, tensors, encoding_dict,con_c
     torch.cuda.empty_cache()
 
 
-    return loss, correct, mse, pr, re, f1, aupr, bacc, aucc, dice_score
+    return loss, correct, mse, pr, re, f1, mcc, aupr, bacc, aucc, dice_score
 
 
 def train_model(args, output):
@@ -561,7 +584,7 @@ def train_model(args, output):
         shuffle=True,
         # num_workers=0,
     )
-    log(f"Loaded {len(train_p1)} training pairs", file=output)
+    log(f"Loaded {len(train_p1)} training pairs", file=output, print_also=True)
     output.flush()
 
     test_df = pd.read_csv(test_fi, sep="\t", header=None)
@@ -592,8 +615,8 @@ def train_model(args, output):
         # num_workers=0,
     )
 
-    log(f"Loaded {len(test_p1)} test pairs", file=output)
-    log("Loading embeddings...", file=output)
+    log(f"Loaded {len(test_p1)} test pairs", file=output, print_also=True)
+    log("Loading embeddings...", file=output, print_also=True)
     output.flush()
 
     embeddings = {}
@@ -603,12 +626,12 @@ def train_model(args, output):
     # embeddings = load_hdf5_parallel(embedding_h5, all_proteins)
 
     #####loading aaMeta data
-    path = "./dataProcess/publicPairs/con_pdb_dict_AgAb.pickle"   
+    path = args.pdb_dict
     with open(path , "rb") as fh:
         encoding_dict = pickle.load(fh)
 
     #####loading con_cdr_dict data
-    pathh = "./dataProcess/publicPairs/con_cdr_dict.pickle"    
+    pathh = args.cdr_dict
     with open(pathh , "rb") as fhh:
         con_cdr_dict = pickle.load(fhh)
 
@@ -624,16 +647,16 @@ def train_model(args, output):
         embedding_modelAg = FullyConnectedEmbed(
             46, projection_dim, dropout=dropout_p
         )
-        log("Initializing embedding model with:", file=output)
-        log(f"\tprojection_dim: {projection_dim}", file=output)
-        log(f"\tdropout_p: {dropout_p}", file=output)
+        log("Initializing embedding model with:", file=output, print_also=True)
+        log(f"\tprojection_dim: {projection_dim}", file=output, print_also=True)
+        log(f"\tdropout_p: {dropout_p}", file=output, print_also=True)
 
         # Create contact model
         hidden_dim = args.hidden_dim
         kernel_width = args.kernel_width
-        log("Initializing contact model with:", file=output)
-        log(f"\thidden_dim: {hidden_dim}", file=output)
-        log(f"\tkernel_width: {kernel_width}", file=output)
+        log("Initializing contact model with:", file=output, print_also=True)
+        log(f"\thidden_dim: {hidden_dim}", file=output, print_also=True)
+        log(f"\tkernel_width: {kernel_width}", file=output, print_also=True)
 
         contact_model = ContactCNN(projection_dim, hidden_dim, kernel_width)
         # Create the full model
@@ -641,11 +664,10 @@ def train_model(args, output):
         do_pool = args.do_pool
         pool_width = args.pool_width
         do_sigmoid = not args.no_sigmoid
-        log("Initializing interaction model with:", file=output)
-        log(f"\tdo_poool: {do_pool}", file=output)
-        log(f"\tpool_width: {pool_width}", file=output)
-        log(f"\tdo_w: {do_w}", file=output)
-        log(f"\tdo_sigmoid: {do_sigmoid}", file=output)
+        log("Initializing interaction model with:", file=output, print_also=True)
+        log(f"\tdo_poool: {do_pool}", file=output, print_also=True)
+        log(f"\tdo_w: {do_w}", file=output, print_also=True)
+        log(f"\tdo_sigmoid: {do_sigmoid}", file=output, print_also=True)
         model = ModelInteraction(
             embedding_model,
             embedding_modelAg,
@@ -657,19 +679,20 @@ def train_model(args, output):
             do_sigmoid=do_sigmoid,
         )
 
-        log(model, file=output)
+        log(model, file=output, print_also=True)
 
     else:
         log(
             "Loading model from checkpoint {}".format(args.checkpoint),
             file=output,
+            print_also=True,
         )
         model = torch.load(args.checkpoint)
         model.use_cuda = use_cuda
 
 
-    modelSeq = DeepPPI(50,5)    #DeepPPI(50,5) 
-    log(modelSeq, file=output)
+    modelSeq = DeepPPI(50,5)    #DeepPPI(50,5)
+    log(modelSeq, file=output, print_also=True)
         
 
     if use_cuda:
@@ -691,20 +714,22 @@ def train_model(args, output):
     optim = torch.optim.NAdam(params, lr=lr)
     optimSeq = torch.optim.NAdam(paramsSeq, lr=1e-4)
 
-    log(f'Using save prefix "{save_prefix}"', file=output)
-    log(f"Training with Adam: lr={lr}, weight_decay={wd}", file=output)
-    log(f"\tnum_epochs: {num_epochs}", file=output)
-    log(f"\tbatch_size: {batch_size}", file=output)
-    log(f"\tinteraction weight: {inter_weight}", file=output)
-    log(f"\tcontact map weight: {cmap_weight}", file=output)
+    log(f'Using save prefix "{save_prefix}"', file=output, print_also=True)
+    log(f"Training with Adam: lr={lr}, weight_decay={wd}", file=output, print_also=True)
+    log(f"\tnum_epochs: {num_epochs}", file=output, print_also=True)
+    log(f"\tbatch_size: {batch_size}", file=output, print_also=True)
+    log(f"\tinteraction weight: {inter_weight}", file=output, print_also=True)
+    log(f"\tcontact map weight: {cmap_weight}", file=output, print_also=True)
     output.flush()
 
     batch_report_fmt = (
         "[{}/{}] training {:.1%}: Loss={:.6}, Accuracy={:.3%}, MSE={:.6}, AUC={:.6}"
     )
-    epoch_report_fmt = "Finished Epoch {}/{}: Loss={:.6}, Accuracy={:.3%}, MSE={:.6}, Precision={:.6}, Recall={:.6}, F1={:.6}, AUPR={:.6}, AUC={:.6}, DICE={:.6}"
+    epoch_report_fmt = "Finished Epoch {}/{}: Loss={:.6}, Accuracy={:.3%}, MSE={:.6}, Precision={:.6}, Recall={:.6}, F1={:.6}, MCC={:.6}, AUPR={:.6}, AUC={:.6}, DICE={:.6}"
 
     N = len(train_iterator) * batch_size
+    best_auc_sofar = -1.0
+    epoch_metrics_list = []   # collect per-epoch metrics for CSV
 
     for epoch in range(num_epochs):
 
@@ -765,7 +790,7 @@ def train_model(args, output):
                     mse_accum,
                     aucc,
                 ]
-                log(batch_report_fmt.format(*tokens), file=output)
+                log(batch_report_fmt.format(*tokens), file=output, print_also=True)
                 output.flush()
 
         model.eval()
@@ -782,6 +807,7 @@ def train_model(args, output):
                 inter_pr,
                 inter_re,
                 inter_f1,
+                inter_mcc,
                 inter_aupr,
                 bacc,
                 inter_auc,
@@ -796,6 +822,7 @@ def train_model(args, output):
                 inter_pr,
                 inter_re,
                 inter_f1,
+                inter_mcc,
                 inter_aupr,
                 inter_auc,
                 inter_dice,
@@ -804,16 +831,34 @@ def train_model(args, output):
                 inter_pr,
                 inter_re,
                 inter_f1,
+                inter_mcc,
                 inter_aupr,
                 inter_auc,
                 inter_dice,
             ]
-            log(epoch_report_fmt.format(*tokens), file=output)
+            log(epoch_report_fmt.format(*tokens), file=output, print_also=True)
 
-            if save_prefix is not None:
-                save_path = save_prefix +str(epoch + 1)+ "_final.sav"
-                save_pathSeq = save_prefix +str(epoch + 1)+ "Seq_final.sav"
-                log(f"Saving final model to {save_path}", file=output)
+            # Collect per-epoch metrics for CSV output
+            epoch_metrics_list.append({
+                'epoch': epoch + 1,
+                'loss': inter_loss,
+                'accuracy': inter_correct / max(bacc, 1),
+                'mse': inter_mse,
+                'precision': inter_pr,
+                'recall': inter_re,
+                'f1': inter_f1,
+                'mcc': inter_mcc,
+                'aupr': inter_aupr,
+                'auc': inter_auc,
+                'dice': inter_dice,
+            })
+
+            # Save model only when AUC improves
+            if save_prefix is not None and inter_auc > best_auc_sofar:
+                best_auc_sofar = inter_auc
+                save_path = save_prefix + "best_final.sav"
+                save_pathSeq = save_prefix + "bestSeq_final.sav"
+                log(f"New best AUC {inter_auc:.4f} at epoch {epoch+1}, saving model to {save_path}", file=output, print_also=True)
                 model.cpu()
                 modelSeq.cpu()
                 torch.save(model, save_path)
@@ -823,25 +868,65 @@ def train_model(args, output):
                     modelSeq.cuda()
                     output.flush()
 
-            if epoch % 200 == 0:
-                    save_path = save_prefix +str(epoch)+ "_final.sav"
-                    save_pathSeq = save_prefix +str(epoch)+ "Seq_final.sav"
-                    log(f"Saving final model to {save_path}", file=output)
-                    model.cpu()
-                    modelSeq.cpu()
-                    torch.save(model, save_path)
-                    torch.save(modelSeq, save_pathSeq)
-                    if use_cuda:
-                        model.cuda()
-                        modelSeq.cuda()
-                        output.flush()
-
 
         output.flush()
 
+    # ============================================================
+    # Final summary
+    # ============================================================
+    # Save per-epoch metrics to CSV if --out-metrics given
+    if args.out_metrics is not None and epoch_metrics_list:
+        import csv
+        fieldnames = ['epoch', 'loss', 'accuracy', 'mse', 'precision', 'recall',
+                      'f1', 'mcc', 'aupr', 'auc', 'dice']
+        with open(args.out_metrics, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(epoch_metrics_list)
+        log(f"Metrics saved to {args.out_metrics}", file=output, print_also=True)
+
+    log("", file=output, print_also=True)
+    log("=" * 70, file=output, print_also=True)
+    log("  Training Complete", file=output, print_also=True)
+    log("=" * 70, file=output, print_also=True)
+    log(f"  Best validation AUC: {best_auc_sofar:.4f} (final epoch: {num_epochs})",
+        file=output, print_also=True)
+    log("=" * 70, file=output, print_also=True)
+
 
 def main(args):
- 
+
+    # ============================================================
+    # Date-stamped output archiving: every run's log, model and
+    # metrics are stored under <date>/ subdirs so results from
+    # different runs never overwrite each other.
+    #   -o            →  output/<date>/<name>
+    #   --save-prefix →  save_model/<date>/<prefix>
+    #   --out-metrics →  output/<date>/<name>
+    # ============================================================
+    run_date = datetime.now().strftime('%Y%m%d')
+
+    if args.outfile is not None:
+        base, name = os.path.dirname(args.outfile), os.path.basename(args.outfile)
+        base = base if base else 'output'
+        out_dir = os.path.join(base, run_date)
+        os.makedirs(out_dir, exist_ok=True)
+        args.outfile = os.path.join(out_dir, name)
+
+    if args.save_prefix is not None:
+        base, name = os.path.dirname(args.save_prefix), os.path.basename(args.save_prefix)
+        base = base if base else 'save_model'
+        save_dir = os.path.join(base, run_date)
+        os.makedirs(save_dir, exist_ok=True)
+        args.save_prefix = os.path.join(save_dir, name)
+
+    if args.out_metrics is not None:
+        base, name = os.path.dirname(args.out_metrics), os.path.basename(args.out_metrics)
+        base = base if base else 'output'
+        out_dir = os.path.join(base, run_date)
+        os.makedirs(out_dir, exist_ok=True)
+        args.out_metrics = os.path.join(out_dir, name)
+
     output = args.outfile
     if output is None:
         output = sys.stdout
@@ -850,6 +935,10 @@ def main(args):
 
     log(f"EpiScan Version {__version__}", file=output, print_also=True)
     log(f'Called as: {" ".join(sys.argv)}', file=output, print_also=True)
+    log(f'Run date: {run_date}', file=output, print_also=True)
+    log(f'Log file    : {args.outfile}', file=output, print_also=True)
+    log(f'Save prefix : {args.save_prefix}', file=output, print_also=True)
+    log(f'Metrics file: {args.out_metrics}', file=output, print_also=True)
 
     # Set the device
     device = args.device

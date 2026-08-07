@@ -92,12 +92,14 @@ class PairedDataset(torch.utils.data.Dataset):
     :param X0: List of first item in the pair
     :param X1: List of second item in the pair
     :param Y: List of labels
+    :param C: (optional) List of catsite positions
     """
 
-    def __init__(self, X0, X1, Y):
+    def __init__(self, X0, X1, Y, C=None):
         self.X0 = X0
         self.X1 = X1
         self.Y = Y
+        self.C = C
         assert len(X0) == len(X1), (
             "X0: "
             + str(len(X0))
@@ -119,6 +121,8 @@ class PairedDataset(torch.utils.data.Dataset):
         return len(self.X0)
 
     def __getitem__(self, i):
+        if self.C is not None:
+            return self.X0[i], self.X1[i], self.Y[i], self.C[i]
         return self.X0[i], self.X1[i], self.Y[i]
 
 
@@ -129,4 +133,7 @@ def collate_paired_sequences(args):
     x0 = [a[0] for a in args]
     x1 = [a[1] for a in args]
     y = [a[2] for a in args]
+    if len(args[0]) > 3:
+        c = [a[3] for a in args]
+        return x0, x1, torch.stack(y, 0), c
     return x0, x1, torch.stack(y, 0)

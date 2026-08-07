@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 #-*- encoding:utf8 -*-
 
 import os
@@ -47,7 +48,7 @@ class ConvsLayer(BasicModule):
     def __init__(self,):
 
         super(ConvsLayer,self).__init__()
-        
+
         self.kernels = [13,15,17]   #configs.kernels
         hidden_channels = 4  #configs.max_sequence_length
         in_channel = 1
@@ -67,7 +68,7 @@ class ConvsLayer(BasicModule):
             kernel_size=(self.kernels[0],W_size)))
         self.conv1.add_module("ReLU",nn.PReLU())
         # self.conv1.add_module("pooling1",nn.MaxPool2d(kernel_size=(features_L,1),stride=1))
-        
+
         self.conv2 = nn.Sequential()
         self.conv2.add_module("conv2",
             nn.Conv2d(in_channel, hidden_channels,
@@ -75,7 +76,7 @@ class ConvsLayer(BasicModule):
             kernel_size=(self.kernels[1],W_size)))
         self.conv2.add_module("ReLU",nn.ReLU())
         # self.conv2.add_module("pooling2",nn.MaxPool2d(kernel_size=(features_L,1),stride=1))
-        
+
         self.conv3 = nn.Sequential()
         self.conv3.add_module("conv3",
             nn.Conv2d(in_channel, hidden_channels,
@@ -84,7 +85,7 @@ class ConvsLayer(BasicModule):
         self.conv3.add_module("ReLU",nn.ReLU())
         # self.conv3.add_module("pooling3",nn.MaxPool2d(kernel_size=(features_L,1),stride=1))
 
-    
+
     def forward(self,x):
 
         features1 = self.conv1(x)
@@ -94,8 +95,9 @@ class ConvsLayer(BasicModule):
         features = features.unsqueeze(0)
         shapes = features.data.shape
         features = features.view(shapes[0],shapes[1]*shapes[2])   #features = features.view(shapes[0],shapes[1]*shapes[2]*shapes[3])
-        
+
         return features
+
 
 
 
@@ -109,8 +111,8 @@ class DeepPPI(BasicModule):
         self.dropout =  0.2   #configs.dropout =
 
         seq_dim = 46*50  # configs.seq_dim configs.max_sequence_length
-        
-        
+
+
         self.seq_layers = nn.Sequential()
         self.seq_layers.add_module("seq_embedding_layer",
         nn.Linear(seq_dim,seq_dim))
@@ -132,7 +134,7 @@ class DeepPPI(BasicModule):
         self.multi_CNN.add_module("layer_convs",
                                ConvsLayer())
 
-        
+
         self.DNN1 = nn.Sequential()
         self.DNN1.add_module("DNN_layer1",
                             nn.Linear(input_dim,512))
@@ -148,7 +150,7 @@ class DeepPPI(BasicModule):
                             nn.ReLU())
         # self.DNN2.add_module("BN2",
         #             nn.BatchNorm2d(256))
-                            
+
 
 
         self.outLayer = nn.Sequential(
