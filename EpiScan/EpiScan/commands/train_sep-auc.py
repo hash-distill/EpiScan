@@ -229,6 +229,12 @@ def add_args(parser):
         default=None,
         help="Path to save final metrics summary CSV"
     )
+    misc_grp.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)"
+    )
 
     return parser
 
@@ -729,6 +735,7 @@ def train_model(args, output):
 
     N = len(train_iterator) * batch_size
     best_auc_sofar = -1.0
+    best_mcc_sofar = -1.0
     epoch_metrics_list = []   # collect per-epoch metrics for CSV
 
     for epoch in range(num_epochs):
@@ -853,7 +860,10 @@ def train_model(args, output):
                 'dice': inter_dice,
             })
 
-            # Save model only when AUC improves
+            # Save model only when AUC improves (rank-based model selection,
+            # consistent with the paper). Threshold metrics (ACC/F1/MCC) are
+            # unstable at this arbitrary epoch, so also keep the best-MCC
+            # checkpoint for a stable threshold-metric evaluation.
             if save_prefix is not None and inter_auc > best_auc_sofar:
                 best_auc_sofar = inter_auc
                 save_path = save_prefix + "best_final.sav"
@@ -863,6 +873,21 @@ def train_model(args, output):
                 modelSeq.cpu()
                 torch.save(model, save_path)
                 torch.save(modelSeq, save_pathSeq)
+                if use_cuda:
+                    model.cuda()
+                    modelSeq.cuda()
+                    output.flush()
+
+            # Also keep the best-MCC checkpoint (threshold-based selection)
+            if save_prefix is not None and inter_mcc > best_mcc_sofar:
+                best_mcc_sofar = inter_mcc
+                save_path_mcc = save_prefix + "bestMCC_final.sav"
+                save_pathSeq_mcc = save_prefix + "bestMCCSeq_final.sav"
+                log(f"New best MCC {inter_mcc:.4f} at epoch {epoch+1}, saving model to {save_path_mcc}", file=output, print_also=True)
+                model.cpu()
+                modelSeq.cpu()
+                torch.save(model, save_path_mcc)
+                torch.save(modelSeq, save_pathSeq_mcc)
                 if use_cuda:
                     model.cuda()
                     modelSeq.cuda()
@@ -891,10 +916,27 @@ def train_model(args, output):
     log("=" * 70, file=output, print_also=True)
     log(f"  Best validation AUC: {best_auc_sofar:.4f} (final epoch: {num_epochs})",
         file=output, print_also=True)
+    log(f"  Best validation MCC: {best_mcc_sofar:.4f}",
+        file=output, print_also=True)
     log("=" * 70, file=output, print_also=True)
 
 
 def main(args):
+
+    # ============================================================
+    # Reproducibility: fix all random seeds so a re-run with the
+    # same data split and hyper-parameters gives identical results.
+    # (DataLoader uses num_workers=0, so global RNG seeds fully
+    # determine model init, dropout and train shuffle order.)
+    # ============================================================
+    import random as _random
+    seed = getattr(args, 'seed', 42)
+    _random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # ============================================================
     # Date-stamped output archiving: every run's log, model and
@@ -936,6 +978,7 @@ def main(args):
     log(f"EpiScan Version {__version__}", file=output, print_also=True)
     log(f'Called as: {" ".join(sys.argv)}', file=output, print_also=True)
     log(f'Run date: {run_date}', file=output, print_also=True)
+    log(f'Random seed: {seed}', file=output, print_also=True)
     log(f'Log file    : {args.outfile}', file=output, print_also=True)
     log(f'Save prefix : {args.save_prefix}', file=output, print_also=True)
     log(f'Metrics file: {args.out_metrics}', file=output, print_also=True)

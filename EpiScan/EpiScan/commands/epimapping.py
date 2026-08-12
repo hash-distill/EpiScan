@@ -140,6 +140,8 @@ def train_model(args, output):
     else:
         modelCon = loaded
         log(f"Loaded full model from {modelCon_path}", file=output)
+    # Critical: disable dropout for inference (matches train_sep-auc.py eval path)
+    modelCon.eval()
     if use_cuda:
         modelCon.cuda()
 
@@ -184,10 +186,21 @@ def train_model(args, output):
             p1Con = p1Con.cuda()
 
         meta_acon = torch.tensor(encoding_dict[n0Con]).unsqueeze(0)
-        meta_acon = meta_acon.to(torch.float).cuda()
+        meta_acon = meta_acon.to(torch.float)
+        # Align antigen meta-feature length to embedding length (same as train_sep-auc.py)
+        if meta_acon.shape[1] < p0Con.shape[1]:
+            pad = torch.zeros((1, p0Con.shape[1] - meta_acon.shape[1], meta_acon.shape[2]))
+            meta_acon = torch.cat([meta_acon, pad], 1)
+        elif meta_acon.shape[1] > p0Con.shape[1]:
+            meta_acon = meta_acon[:, :p0Con.shape[1], :]
+        if use_cuda:
+            meta_acon = meta_acon.cuda()
         p0Con = torch.cat([p0Con[:,:,:], meta_acon], 2)
+        # Clamp CDR indices to the antibody embedding length (same as train_sep-auc.py)
+        ab_len = p1Con.shape[1]
         index_cdrlist = [a for a, b in enumerate(con_cdr_dict[n1Con]) if b == 1]
-        cmCon,_ = modelCon.map_predict(p0Con, p1Con, test_dfCon[3][indedx], index_cdrlist) 
+        index_cdrlist = [a for a in index_cdrlist if a < ab_len]
+        cmCon,_ = modelCon.map_predict(p0Con, p1Con, test_dfCon[3][indedx], index_cdrlist)
         probCon_map = torch.mean(cmCon, 3).squeeze()
         probCon = probCon_map.cpu().detach().numpy()
         all_results.append(probCon)
